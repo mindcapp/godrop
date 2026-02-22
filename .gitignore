@@ -1,0 +1,11 @@
+# build
+*.exe
+*.out
+
+# data 
+data/uploads/
+uploads/
+
+# OS / IDE
+.DS_Store
+.vscode/
