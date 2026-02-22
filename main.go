@@ -9,7 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"encoding/base64"
+    "net"
+    "github.com/skip2/go-qrcode"
+	"strings"
 )
+
 
 const (
 	addr      = ":8080"
@@ -44,7 +49,12 @@ var pageTmpl = template.Must(template.New("index").Parse(`
 </head>
 <body>
   <h1>DropGo</h1>
-
+  <div class="card">
+  <h3 style="margin-top:0">Вход с мобильного устройства</h3>
+  <p><a href="{{.URL}}">{{.URL}}</a></p>
+  <img src="/qr.png" width="220" style="border-radius:12px; border:1px solid #eee;">
+  <p><small>Сканируй камерой iPhone/Android и сразу открывай сайт!</small></p>
+  </div>
   <div class="card">
     <form enctype="multipart/form-data" action="/upload" method="post">
       <div class="row">
@@ -54,7 +64,9 @@ var pageTmpl = template.Must(template.New("index").Parse(`
     </form>
     {{if .Msg}}<p><small>{{.Msg}}</small></p>{{end}}
   </div>
-
+<div class="row" style="margin-top:10px">
+  <a class="btn2" href="/gallery">Открыть галерею</a>
+</div>
   <div class="card">
     <h3 style="margin-top:0">Файлы ({{len .Files}})</h3>
     {{if not .Files}}
@@ -79,6 +91,75 @@ var pageTmpl = template.Must(template.New("index").Parse(`
 </body>
 </html>
 `))
+var galleryTmpl = template.Must(template.New("gallery").Parse(`
+<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DropGo — Галерея</title>
+  <style>
+    body { font-family: -apple-system, Arial; padding: 16px; max-width: 900px; margin: 0 auto; }
+    a { color:#1677ff; text-decoration:none; }
+    .top { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; margin-top: 16px; }
+    .item { border:1px solid #eee; border-radius: 12px; overflow:hidden; background:#fff; }
+    .item img { width:100%; height:140px; object-fit:cover; display:block; }
+    .cap { padding:8px; font-size:12px; color:#333; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h2 style="margin:0">Галерея</h2>
+    <a href="/">← назад</a>
+  </div>
+
+  <div class="grid">
+    {{range .Images}}
+      <div class="item">
+        <a href="{{.URL}}">
+          <img src="{{.URL}}" alt="{{.Name}}">
+        </a>
+        <div class="cap">{{.Name}}</div>
+      </div>
+    {{end}}
+  </div>
+
+  {{if not .Images}}
+    <p>Пока нет картинок.</p>
+  {{end}}
+</body>
+</html>
+`))
+
+func isImage(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp"
+}
+
+func galleryHandler(w http.ResponseWriter, r *http.Request) {
+	entries, _ := os.ReadDir(uploadDir)
+	images := make([]FileItem, 0)
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if !isImage(e.Name()) {
+			continue
+		}
+		name := filepath.Base(e.Name())
+		images = append(images, FileItem{
+			Name: name,
+			URL:  "/f/" + name,
+		})
+	}
+
+	_ = galleryTmpl.Execute(w, struct {
+		Images []FileItem
+	}{
+		Images: images,
+	})
+}
 
 func safeBaseName(name string) string {
 	// оставляем только имя файла, без путей
@@ -87,13 +168,41 @@ func safeBaseName(name string) string {
 	return html.EscapeString(name)
 }
 
+func getLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "127.0.0.1"
+	}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
+		}
+		ip := ipnet.IP.To4()
+		if ip == nil {
+			continue
+		}
+		// обычно локалка 192.168.x.x / 10.x.x.x / 172.16-31.x.x
+		s := ip.String()
+		if strings.HasPrefix(s, "192.168.") || strings.HasPrefix(s, "10.") || strings.HasPrefix(s, "172.") {
+			return s
+		}
+	}
+	return "127.0.0.1"
+}
+
 func indexHandler(w http.ResponseWriter, r *http.Request) {
+	host := getLocalIP()
+    url := "http://" + host + addr
+
+    png, _ := qrcode.Encode(url, qrcode.Medium, 256)
+    qrB64 := "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
 	msg := r.URL.Query().Get("msg")
 
 	entries, _ := os.ReadDir(uploadDir)
 	files := make([]FileItem, 0, len(entries))
-
-	// соберём список (без папок)
+    
+	
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -113,12 +222,16 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = pageTmpl.Execute(w, struct {
-		Msg   string
-		Files []FileItem
-	}{
-		Msg:   msg,
-		Files: files,
-	})
+	Msg   string
+	Files []FileItem
+	URL   string
+	QR    string
+}{
+	Msg:   msg,
+	Files: files,
+	URL:   url,
+	QR:    qrB64,
+})
 }
 
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +289,19 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/?msg=Удалено", http.StatusSeeOther)
 }
+func qrHandler(w http.ResponseWriter, r *http.Request) {
+	host := getLocalIP()
+	url := "http://" + host + addr
 
+	png, err := qrcode.Encode(url, qrcode.Medium, 256)
+	if err != nil {
+		http.Error(w, "qr error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	_, _ = w.Write(png)
+}
 func main() {
 	_ = os.MkdirAll(uploadDir, os.ModePerm)
 
@@ -184,7 +309,8 @@ func main() {
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/f/", fileHandler)
 	http.HandleFunc("/delete", deleteHandler)
-
+    http.HandleFunc("/qr.png", qrHandler)
+	http.HandleFunc("/gallery", galleryHandler)
 	fmt.Println("DropGo started on", addr)
 	_ = http.ListenAndServe(addr, nil)
 }
